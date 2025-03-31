@@ -12,6 +12,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
       in
       {
+        # Build configuration
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "limebar";
           version = "0.1.0";
@@ -31,7 +32,8 @@
             pango
           ];
 
-          preBuild = ''
+          # Generate protocols and build in one phase
+          buildPhase = ''
             # Generate layer shell protocol
             wayland-scanner client-header \
               protocols/wlr-layer-shell-unstable-v1.xml \
@@ -47,18 +49,17 @@
             wayland-scanner private-code \
               ${pkgs.wayland-protocols}/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
               xdg-shell-client-protocol.c
-          '';
 
-          buildPhase = ''
-              $CC -g -Wall -Wextra \
-                $(pkg-config --cflags wayland-client cairo pango pangocairo) \
-                -I. \
-                -o limebar \
-                main.c \
-                wlr-layer-shell-unstable-v1-client-protocol.c \
-                xdg-shell-client-protocol.c \
-                $(pkg-config --libs wayland-client cairo pango pangocairo) \
-                -lwayland-client
+            # Build the program
+            $CC -g -Wall -Wextra \
+              $(pkg-config --cflags wayland-client cairo pango pangocairo) \
+              -I. \
+              -o limebar \
+              main.c \
+              wlr-layer-shell-unstable-v1-client-protocol.c \
+              xdg-shell-client-protocol.c \
+              $(pkg-config --libs wayland-client cairo pango pangocairo) \
+              -lwayland-client
           '';
 
           installPhase = ''
@@ -67,10 +68,13 @@
           '';
         };
 
+        # Development shell
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
+          packages = with pkgs; [
             pkg-config
             wayland-scanner
+            gcc
+            gnumake
           ];
 
           buildInputs = with pkgs; [
@@ -85,6 +89,13 @@
           shellHook = ''
             echo "Limebar development shell"
 
+            # Create build script
+            cat > build.sh << 'EOF'
+            #!/bin/sh
+            set -e
+
+            echo "Generating protocols..."
+
             # Generate layer shell protocol
             wayland-scanner client-header \
               protocols/wlr-layer-shell-unstable-v1.xml \
@@ -101,11 +112,7 @@
               ${pkgs.wayland-protocols}/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
               xdg-shell-client-protocol.c
 
-            # Create build script
-            cat > build.sh << 'EOF'
-            #!/bin/sh
-            set -e
-
+            echo "Building limebar..."
             cc -g -Wall -Wextra \
               $(pkg-config --cflags wayland-client cairo pango pangocairo) \
               -I. \
@@ -115,6 +122,8 @@
               xdg-shell-client-protocol.c \
               $(pkg-config --libs wayland-client cairo pango pangocairo) \
               -lwayland-client
+
+            echo "Build complete!"
             EOF
 
             chmod +x build.sh

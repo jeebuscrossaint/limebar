@@ -1,1 +1,11 @@
-target/
+# Build outputs
+/limebar
+/result
+/result-*
+/build.sh
+
+# Generated protocol files
+wlr-layer-shell-unstable-v1-client-protocol.h
+wlr-layer-shell-unstable-v1-client-protocol.c
+xdg-shell-client-protocol.h
+xdg-shell-client-protocol.c
