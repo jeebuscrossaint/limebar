@@ -678,18 +678,27 @@ int main(int argc, char *argv[]) {
 
     // Create layer surface
     bar.layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-            bar.layer_shell, bar.surface, NULL,
-            ZWLR_LAYER_SHELL_V1_LAYER_TOP, "limebar");
-    if (!bar.layer_surface) {
-        fprintf(stderr, "Failed to create layer surface\n");
-        return 1;
-    }
+                bar.layer_shell, bar.surface, NULL,
+                ZWLR_LAYER_SHELL_V1_LAYER_TOP, "limebar");
+        if (!bar.layer_surface) {
+            fprintf(stderr, "Failed to create layer surface\n");
+            return 1;
+        }
 
-    zwlr_layer_surface_v1_set_size(bar.layer_surface, bar.width, bar.height);
-    zwlr_layer_surface_v1_set_anchor(bar.layer_surface,
-            ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
-            ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
-            ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+        // Set exclusive zone to reserve space
+        zwlr_layer_surface_v1_set_exclusive_zone(bar.layer_surface, bar.height);
+
+        // Set size
+        zwlr_layer_surface_v1_set_size(bar.layer_surface, bar.width, bar.height);
+
+        // Set anchor based on position
+        uint32_t anchor = ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+        if (bar.config->position == POSITION_BOTTOM) {
+            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+        } else {
+            anchor |= ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
+        }
+        zwlr_layer_surface_v1_set_anchor(bar.layer_surface, anchor);
     zwlr_layer_surface_v1_add_listener(bar.layer_surface,
             &layer_surface_listener, &bar);
 
