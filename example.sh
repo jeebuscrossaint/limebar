@@ -19,7 +19,7 @@ if [ "$1" == "raw" ]; then
         CPU=$(get_cpu_usage)
         printf "CPU: %.1f%%\n" $CPU
         sleep 1
-    done | ./limebar -r -F "#ff606c" -B "#1a1a1a" -p 10
+    done | ./result/bin/limebar -r -F "#ff606c" -B "#1a1a1a" -p 10
 else
     # Formatted block mode
     while true; do
@@ -39,5 +39,5 @@ else
         printf "[F=$ICON_COLOR:  ] [F=$COLOR:CPU %.1f%%]\n" $CPU
 
         sleep 1
-    done | ./limebar -B "#1a1a1a" -f "FiraCode Nerd Font 11" -p 10
+    done | ./result/bin/limebar -B "#1a1a1a" -f "FiraCode Nerd Font 11" -p 10
 fi
