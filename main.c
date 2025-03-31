@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <cairo/cairo.h>
+#include <getopt.h>
 #include <stdbool.h>
 #include <wayland-client.h>
 #include <wayland-client-protocol.h>
@@ -13,6 +14,51 @@
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include <pango/pango.h>
 #include <pango/pangocairo.h>
+
+struct bar_config {
+    int width;
+    int height;
+    char *background_color;
+    char **fonts;
+    int num_fonts;
+    int underline_thickness;
+};
+
+static void print_usage(const char *program_name) {
+    fprintf(stderr,
+        "Usage: %s [options]\n"
+        "\n"
+        "Options:\n"
+        "  -g, --geometry WxH+X+Y    Set bar geometry (e.g., 1920x24+0+0)\n"
+        "  -B, --background COLOR    Set background color (e.g., #1a1a1a)\n"
+        "  -f, --font FONT          Add font (can be used multiple times)\n"
+        "  -u, --underline SIZE     Set underline thickness (default: 2)\n"
+        "  -h, --help              Show this help message\n",
+        program_name);
+}
+
+static void parse_geometry(const char *geometry, int *width, int *height, int *x, int *y) {
+    sscanf(geometry, "%dx%d+%d+%d", width, height, x, y);
+}
+
+static void parse_color_str(const char *color, double *r, double *g, double *b, double *a) {
+    if (color[0] == '#') {
+        unsigned int rgb;
+        if (strlen(color) == 7) { // #RRGGBB
+            sscanf(color + 1, "%x", &rgb);
+            *r = ((rgb >> 16) & 0xFF) / 255.0;
+            *g = ((rgb >> 8) & 0xFF) / 255.0;
+            *b = (rgb & 0xFF) / 255.0;
+            *a = 1.0;
+        } else if (strlen(color) == 9) { // #RRGGBBAA
+            sscanf(color + 1, "%x", &rgb);
+            *r = ((rgb >> 24) & 0xFF) / 255.0;
+            *g = ((rgb >> 16) & 0xFF) / 255.0;
+            *b = ((rgb >> 8) & 0xFF) / 255.0;
+            *a = (rgb & 0xFF) / 255.0;
+        }
+    }
+}
 
 struct text_block {
     char *text;
@@ -49,6 +95,10 @@ struct limebar {
     struct text_block *blocks;
     char **fonts;
     int num_fonts;
+
+    struct {
+            double r, g, b, a;
+        } bg_color;
 };
 
 static struct text_block *parse_input(const char *input) {
@@ -190,10 +240,14 @@ static void parse_color(const char *color_str, double *r, double *g, double *b) 
 }
 
 static void draw(struct limebar *bar) {
-    printf("Drawing started\n");  // Debug print
+    printf("Drawing started\n");
 
-    cairo_set_source_rgba(bar->cairo, 0.1, 0.0, 0.17, 1.0);
-    cairo_paint(bar->cairo);
+        cairo_set_source_rgba(bar->cairo,
+            bar->bg_color.r,
+            bar->bg_color.g,
+            bar->bg_color.b,
+            bar->bg_color.a);
+        cairo_paint(bar->cairo);
 
     if (!bar->pango_context) {
         bar->pango_context = pango_cairo_create_context(bar->cairo);
@@ -321,20 +375,84 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
 };
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    struct bar_config config = {
+            .width = 1920,
+            .height = 24,
+            .background_color = "#1a1a1a",
+            .fonts = NULL,
+            .num_fonts = 0,
+            .underline_thickness = 2
+        };
 
-    struct limebar bar = {0};
-    bar.width = 1920;  // Default width
-    bar.height = 24;   // Default height
+        // Define command line options
+        static struct option long_options[] = {
+            {"geometry", required_argument, 0, 'g'},
+            {"background", required_argument, 0, 'B'},
+            {"font", required_argument, 0, 'f'},
+            {"underline", required_argument, 0, 'u'},
+            {"help", no_argument, 0, 'h'},
+            {0, 0, 0, 0}
+        };
 
-    bar.num_fonts = 2;
-    bar.fonts = malloc(sizeof(char*) * bar.num_fonts);
-    bar.fonts[0] = "Monospace 12";
-    bar.fonts[1] = "Monospace Bold 12";
+        // Parse command line options
+        int opt;
+        while ((opt = getopt_long(argc, argv, "g:B:f:u:h", long_options, NULL)) != -1) {
+            switch (opt) {
+                case 'g': {
+                    int x, y;
+                    parse_geometry(optarg, &config.width, &config.height, &x, &y);
+                    break;
+                }
+                case 'B':
+                    config.background_color = optarg;
+                    break;
+                case 'f': {
+                    config.num_fonts++;
+                    config.fonts = realloc(config.fonts, sizeof(char*) * config.num_fonts);
+                    config.fonts[config.num_fonts - 1] = strdup(optarg);
+                    break;
+                }
+                case 'u':
+                    config.underline_thickness = atoi(optarg);
+                    break;
+                case 'h':
+                    print_usage(argv[0]);
+                    return 0;
+                default:
+                    print_usage(argv[0]);
+                    return 1;
+            }
+        }
 
-    const char *test_input = "[F=#ffffff,T=1:Hello] [F=#ff0000,u:World]";
-    bar.blocks = parse_input(test_input);
+        // Set default fonts if none specified
+        if (config.num_fonts == 0) {
+            config.num_fonts = 2;
+            config.fonts = malloc(sizeof(char*) * config.num_fonts);
+            config.fonts[0] = strdup("Monospace 12");
+            config.fonts[1] = strdup("Monospace Bold 12");
+        }
+
+        struct limebar bar = {0};
+            bar.width = config.width;
+            bar.height = config.height;
+            bar.num_fonts = config.num_fonts;
+            bar.fonts = config.fonts;
+
+            // Set background color
+            parse_color_str(config.background_color,
+                &bar.bg_color.r,
+                &bar.bg_color.g,
+                &bar.bg_color.b,
+                &bar.bg_color.a);
+
+            // Remove duplicate font initialization
+            // bar.num_fonts = 2;
+            // bar.fonts = malloc(sizeof(char*) * bar.num_fonts);
+            // bar.fonts[0] = "Monospace 12";
+            // bar.fonts[1] = "Monospace Bold 12";
+
+            const char *test_input = "[F=#ffffff,T=1:Hello] [F=#ff0000,u:World]";
+            bar.blocks = parse_input(test_input);
 
     // Connect to Wayland display
     bar.display = wl_display_connect(NULL);
@@ -405,7 +523,10 @@ int main(int argc, char *argv[]) {
             free(block);
             block = next;
         }
-        free(bar.fonts);
+        for (int i = 0; i < config.num_fonts; i++) {
+                free(config.fonts[i]);
+            }
+            free(config.fonts);
 
         if (bar.cairo)
             cairo_destroy(bar.cairo);
