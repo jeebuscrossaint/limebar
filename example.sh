@@ -1,35 +1,43 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-BG="#1a002b"
-NET_COLOR="#00ff00"
-LOAD_COLOR="#ff606c"
-MEM_COLOR="#ffa753"
-TIME_COLOR="#97bcd3"
+# Colors
+CPU_COLOR="#ff606c"   # Red
+HIGH_LOAD="#ff0000"   # Bright red for high usage
+MED_LOAD="#ffff00"    # Yellow for medium usage
+LOW_LOAD="#00ff00"    # Green for low usage
+ICON_COLOR="#f66a22"  # Orange for icon
 
-get_network_speed() {
-    local iface="wlan0"  # Change this to your interface
-    local rx1=$(cat /sys/class/net/$iface/statistics/rx_bytes)
-    local tx1=$(cat /sys/class/net/$iface/statistics/tx_bytes)
-    sleep 1
-    local rx2=$(cat /sys/class/net/$iface/statistics/rx_bytes)
-    local tx2=$(cat /sys/class/net/$iface/statistics/tx_bytes)
-
-    local rxKB=$(( (rx2 - rx1) / 1024 ))
-    local txKB=$(( (tx2 - tx1) / 1024 ))
-    echo "$rxKB $txKB"
+get_cpu_usage() {
+    # Get CPU usage percentage
+    top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1}'
 }
 
-while true; do
-    read RX TX <<< $(get_network_speed)
-    LOAD=$(uptime | awk -F'average: ' '{print $2}' | cut -d, -f1)
-    MEM=$(free | grep Mem | awk '{print int($3/$2 * 100)}')
-    TIME=$(date "+%H:%M:%S")
+# Check if raw mode is requested
+if [ "$1" == "raw" ]; then
+    # Raw mode
+    while true; do
+        CPU=$(get_cpu_usage)
+        printf "CPU: %.1f%%\n" $CPU
+        sleep 1
+    done | ./limebar -r -F "#ff606c" -B "#1a1a1a" -p 10
+else
+    # Formatted block mode
+    while true; do
+        CPU=$(get_cpu_usage)
 
-    OUTPUT=""
-    OUTPUT+="[F=$NET_COLOR:↓${RX}KB/s ↑${TX}KB/s] "
-    OUTPUT+="[F=$LOAD_COLOR: ${LOAD}] "
-    OUTPUT+="[F=$MEM_COLOR: ${MEM}%] "
-    OUTPUT+="[F=$TIME_COLOR: ${TIME}]"
+        # Set color based on usage
+        if [ $(echo "$CPU > 80" | bc -l) -eq 1 ]; then
+            COLOR=$HIGH_LOAD
+        elif [ $(echo "$CPU > 50" | bc -l) -eq 1 ]; then
+            COLOR=$MED_LOAD
+        else
+            COLOR=$LOW_LOAD
+        fi
 
-    echo "$OUTPUT"
-done | ./limebar -g 1920x24+0+0 -B "$BG" -f "FiraCode Nerd Font 11" -u 2
+        # Format with blocks
+        # Using  as CPU icon (needs Nerd Font)
+        printf "[F=$ICON_COLOR:  ] [F=$COLOR:CPU %.1f%%]\n" $CPU
+
+        sleep 1
+    done | ./limebar -B "#1a1a1a" -f "FiraCode Nerd Font 11" -p 10
+fi
