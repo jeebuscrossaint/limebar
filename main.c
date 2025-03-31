@@ -23,6 +23,8 @@ struct bar_config {
     char **fonts;
     int num_fonts;
     int underline_thickness;
+    bool raw_mode;        // Add this for raw text mode
+        char *text_color;     // Add this for default text
 
     // New options
     int padding;           // Text padding
@@ -48,6 +50,8 @@ static void print_usage(const char *program_name) {
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
+        "  -r, --raw              Enable raw text mode (no block parsing)\n"
+        "  -F, --text-color COLOR Set default text color for raw mode\n"
         "  -g, --geometry WxH+X+Y    Set bar geometry (e.g., 1920x24+0+0)\n"
         "  -B, --background COLOR    Set background color (e.g., #1a1a1a)\n"
         "  -f, --font FONT          Add font (can be used multiple times)\n"
@@ -487,6 +491,12 @@ static void read_stdin(struct limebar *bar) {
     ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
     if (bytes_read > 0) {
         buffer[bytes_read] = '\0';
+
+        // Remove trailing newline if present
+        if (buffer[bytes_read - 1] == '\n') {
+            buffer[bytes_read - 1] = '\0';
+        }
+
         // Free old blocks
         struct text_block *block = bar->blocks;
         while (block) {
@@ -498,8 +508,20 @@ static void read_stdin(struct limebar *bar) {
             free(block);
             block = next;
         }
-        // Parse new input
-        bar->blocks = parse_input(buffer);
+        bar->blocks = NULL;
+
+        if (bar->config->raw_mode) {
+            // Create a single block with the raw text
+            struct text_block *block = calloc(1, sizeof(struct text_block));
+            block->text = strdup(buffer);
+            block->fg_color = bar->config->text_color ? strdup(bar->config->text_color) : NULL;
+            block->font_index = 0;
+            bar->blocks = block;
+        } else {
+            // Parse input as blocks
+            bar->blocks = parse_input(buffer);
+        }
+
         // Redraw
         draw(bar);
     }
@@ -521,7 +543,9 @@ int main(int argc, char *argv[]) {
         .margin_left = 0,
         .margin_right = 0,
         .separator = NULL,
-        .opacity = 1.0
+        .opacity = 1.0,
+        .raw_mode = false,
+        .text_color = "#ffffff",  // Default to white text
     };
 
     static struct option long_options[] = {
@@ -536,11 +560,13 @@ int main(int argc, char *argv[]) {
         {"separator", required_argument, 0, 's'},
         {"opacity", required_argument, 0, 'o'},
         {"help", no_argument, 0, 'h'},
-        {0, 0, 0, 0}
+        {"raw", no_argument, 0, 'r'},
+                {"text-color", required_argument, 0, 'F'},
+                {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "g:B:f:u:p:a:t:m:s:o:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "g:B:f:u:p:a:t:m:s:o:rF:h", long_options, NULL)) != -1) {
         switch (opt) {
             case 'g': {
                 int x, y;
@@ -556,6 +582,12 @@ int main(int argc, char *argv[]) {
                 config.fonts[config.num_fonts - 1] = strdup(optarg);
                 break;
             }
+            case 'r':
+                            config.raw_mode = true;
+                            break;
+                        case 'F':
+                            config.text_color = optarg;
+                            break;
             case 'u':
                 config.underline_thickness = atoi(optarg);
                 break;
