@@ -6,10 +6,29 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <cairo/cairo.h>
+#include <stdbool.h>
 #include <wayland-client.h>
 #include <wayland-client-protocol.h>
 #include "xdg-shell-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include <pango/pango.h>
+#include <pango/pangocairo.h>
+
+struct text_block {
+    char *text;
+    char *fg_color;
+    char *bg_color;
+    char *underline_color;
+    int font_index;
+    bool underline;
+    enum {
+        ALIGN_LEFT,
+        ALIGN_CENTER,
+        ALIGN_RIGHT
+    } alignment;
+    struct text_block *next;
+};
+
 
 struct limebar {
     struct wl_display *display;
@@ -25,7 +44,88 @@ struct limebar {
     cairo_surface_t *cairo_surface;
     cairo_t *cairo;
     void *shm_data;
+    PangoContext *pango_context;
+    PangoLayout *pango_layout;
+    struct text_block *blocks;
+    char **fonts;
+    int num_fonts;
 };
+
+static struct text_block *parse_input(const char *input) {
+    printf("Parsing input: %s\n", input);
+    struct text_block *head = NULL;
+    struct text_block *current = NULL;
+
+    char *str = strdup(input);
+    char *saveptr1;
+    char *token = strtok_r(str, "[]", &saveptr1);
+
+    while (token) {
+        // Skip leading whitespace
+        while (*token == ' ') token++;
+
+        if (strchr(token, ':')) {
+            struct text_block *block = calloc(1, sizeof(struct text_block));
+
+            char *attrs_text = strdup(token);
+            char *saveptr2;
+            char *attrs = strtok_r(attrs_text, ":", &saveptr2);
+            char *text = strtok_r(NULL, ":", &saveptr2);
+
+            printf("Parsing block - attrs: %s, text: %s\n", attrs, text);
+
+            char *saveptr3;
+            char *attr = strtok_r(attrs, ",", &saveptr3);
+            while (attr) {
+                printf("Processing attribute: %s\n", attr);
+                switch (attr[0]) {
+                    case 'F':
+                        block->fg_color = strdup(attr + 2);
+                        printf("Set fg_color: %s\n", block->fg_color);
+                        break;
+                    case 'B':
+                        block->bg_color = strdup(attr + 2);
+                        break;
+                    case 'U':
+                        block->underline_color = strdup(attr + 2);
+                        break;
+                    case 'T':
+                        block->font_index = atoi(attr + 2) - 1;
+                        break;
+                    case 'u':
+                        block->underline = true;
+                        printf("Set underline: true\n");
+                        break;
+                }
+                attr = strtok_r(NULL, ",", &saveptr3);
+            }
+
+            block->text = text ? strdup(text) : strdup("");
+
+            if (!head) {
+                head = block;
+                current = block;
+            } else {
+                current->next = block;
+                current = block;
+            }
+            free(attrs_text);
+        }
+        token = strtok_r(NULL, "[]", &saveptr1);
+    }
+
+    // Print all blocks for debugging
+    struct text_block *block = head;
+    while (block) {
+        printf("Block - text: %s, fg_color: %s, underline: %d\n",
+               block->text, block->fg_color ? block->fg_color : "none",
+               block->underline);
+        block = block->next;
+    }
+
+    free(str);
+    return head;
+}
 
 static void registry_global(void *data, struct wl_registry *registry,
         uint32_t name, const char *interface, uint32_t version);
@@ -73,23 +173,86 @@ static void create_buffer(struct limebar *bar) {
     bar->cairo = cairo_create(bar->cairo_surface);
 }
 
+static void parse_color(const char *color_str, double *r, double *g, double *b) {
+    printf("Parsing color: %s\n", color_str);  // Debug print
+    if (color_str[0] == '#') {
+        unsigned int color;
+        sscanf(color_str + 1, "%x", &color);
+        *r = ((color >> 16) & 0xFF) / 255.0;
+        *g = ((color >> 8) & 0xFF) / 255.0;
+        *b = (color & 0xFF) / 255.0;
+        printf("Parsed color values: r=%f, g=%f, b=%f\n", *r, *g, *b);  // Debug print
+    } else {
+        *r = 1.0;
+        *g = 1.0;
+        *b = 1.0;
+    }
+}
+
 static void draw(struct limebar *bar) {
-    // Clear the surface with a semi-transparent dark gray
-    cairo_set_source_rgba(bar->cairo, 0.2, 0.2, 0.2, 0.9);
+    printf("Drawing started\n");  // Debug print
+
+    cairo_set_source_rgba(bar->cairo, 0.1, 0.0, 0.17, 1.0);
     cairo_paint(bar->cairo);
 
-    // Draw text
-    cairo_select_font_face(bar->cairo, "monospace",
-            CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(bar->cairo, 14);
-    cairo_set_source_rgba(bar->cairo, 1.0, 1.0, 1.0, 1.0);  // White text
-    cairo_move_to(bar->cairo, 10, 17);
-    cairo_show_text(bar->cairo, "Limebar");
+    if (!bar->pango_context) {
+        bar->pango_context = pango_cairo_create_context(bar->cairo);
+        bar->pango_layout = pango_layout_new(bar->pango_context);
+    }
 
-    // Flush Cairo operations
-    cairo_surface_flush(bar->cairo_surface);
+    int x = 10;
+    struct text_block *block = bar->blocks;
 
-    // Attach and commit
+    while (block) {
+        printf("Drawing block - text: %s\n", block->text);  // Debug print
+
+        PangoFontDescription *font_desc = pango_font_description_from_string(
+            bar->fonts[block->font_index]);
+        pango_layout_set_font_description(bar->pango_layout, font_desc);
+
+        if (block->fg_color) {
+            double r, g, b;
+            parse_color(block->fg_color, &r, &g, &b);
+            cairo_set_source_rgb(bar->cairo, r, g, b);
+            printf("Setting color: r=%f, g=%f, b=%f\n", r, g, b);  // Debug print
+        } else {
+            cairo_set_source_rgb(bar->cairo, 1.0, 1.0, 1.0);
+        }
+
+        pango_layout_set_text(bar->pango_layout, block->text, -1);
+
+        int width, height;
+        pango_layout_get_pixel_size(bar->pango_layout, &width, &height);
+        printf("Text dimensions: width=%d, height=%d\n", width, height);  // Debug print
+
+        cairo_move_to(bar->cairo, x, (bar->height - height) / 2);
+        pango_cairo_show_layout(bar->cairo, bar->pango_layout);
+
+        if (block->underline) {
+            printf("Drawing underline\n");  // Debug print
+            double r, g, b;
+            if (block->underline_color) {
+                parse_color(block->underline_color, &r, &g, &b);
+            } else if (block->fg_color) {
+                parse_color(block->fg_color, &r, &g, &b);
+            } else {
+                r = g = b = 1.0;
+            }
+
+            cairo_set_source_rgb(bar->cairo, r, g, b);
+            cairo_set_line_width(bar->cairo, 2.0);
+            cairo_move_to(bar->cairo, x, bar->height - 2);
+            cairo_line_to(bar->cairo, x + width, bar->height - 2);
+            cairo_stroke(bar->cairo);
+        }
+
+        x += width + 10;
+        pango_font_description_free(font_desc);
+        block = block->next;
+    }
+
+    printf("Drawing completed\n");  // Debug print
+
     wl_surface_attach(bar->surface, bar->buffer, 0, 0);
     wl_surface_damage_buffer(bar->surface, 0, 0, bar->width, bar->height);
     wl_surface_commit(bar->surface);
@@ -165,6 +328,14 @@ int main(int argc, char *argv[]) {
     bar.width = 1920;  // Default width
     bar.height = 24;   // Default height
 
+    bar.num_fonts = 2;
+    bar.fonts = malloc(sizeof(char*) * bar.num_fonts);
+    bar.fonts[0] = "Monospace 12";
+    bar.fonts[1] = "Monospace Bold 12";
+
+    const char *test_input = "[F=#ffffff,T=1:Hello] [F=#ff0000,u:World]";
+    bar.blocks = parse_input(test_input);
+
     // Connect to Wayland display
     bar.display = wl_display_connect(NULL);
     if (!bar.display) {
@@ -211,11 +382,53 @@ int main(int argc, char *argv[]) {
     wl_display_roundtrip(bar.display);
     wl_display_roundtrip(bar.display); // Add a second roundtrip
 
+    create_buffer(&bar);
+        draw(&bar);
+
+        wl_surface_commit(bar.surface);
+        wl_display_roundtrip(bar.display);
+        wl_display_roundtrip(bar.display);
+
     // Main event loop
     while (wl_display_dispatch(bar.display) != -1) {
         // Events handled in callbacks
     }
 
-    // ... rest of cleanup code ...
-    return 0;
+    // Cleanup
+        struct text_block *block = bar.blocks;
+        while (block) {
+            struct text_block *next = block->next;
+            free(block->text);
+            free(block->fg_color);
+            free(block->bg_color);
+            free(block->underline_color);
+            free(block);
+            block = next;
+        }
+        free(bar.fonts);
+
+        if (bar.cairo)
+            cairo_destroy(bar.cairo);
+        if (bar.cairo_surface)
+            cairo_surface_destroy(bar.cairo_surface);
+        if (bar.buffer)
+            wl_buffer_destroy(bar.buffer);
+        if (bar.shm_data)
+            munmap(bar.shm_data, bar.width * bar.height * 4);
+        if (bar.layer_surface)
+            zwlr_layer_surface_v1_destroy(bar.layer_surface);
+        if (bar.surface)
+            wl_surface_destroy(bar.surface);
+        if (bar.layer_shell)
+            zwlr_layer_shell_v1_destroy(bar.layer_shell);
+        if (bar.shm)
+            wl_shm_destroy(bar.shm);
+        if (bar.compositor)
+            wl_compositor_destroy(bar.compositor);
+        if (bar.registry)
+            wl_registry_destroy(bar.registry);
+        if (bar.display)
+            wl_display_disconnect(bar.display);
+
+        return 0;
 }
