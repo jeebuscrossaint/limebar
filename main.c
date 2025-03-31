@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <cairo/cairo.h>
+#include <poll.h>
 #include <getopt.h>
 #include <stdbool.h>
 #include <wayland-client.h>
@@ -22,6 +23,24 @@ struct bar_config {
     char **fonts;
     int num_fonts;
     int underline_thickness;
+
+    // New options
+    int padding;           // Text padding
+    enum {
+        ALIGN_DEFAULT_LEFT,
+        ALIGN_DEFAULT_CENTER,
+        ALIGN_DEFAULT_RIGHT
+    } default_alignment;
+    enum {
+        POSITION_TOP,
+        POSITION_BOTTOM
+    } position;
+    int margin_top;
+    int margin_bottom;
+    int margin_left;
+    int margin_right;
+    char *separator;       // Block separator
+    double opacity;        // Background opacity
 };
 
 static void print_usage(const char *program_name) {
@@ -33,6 +52,12 @@ static void print_usage(const char *program_name) {
         "  -B, --background COLOR    Set background color (e.g., #1a1a1a)\n"
         "  -f, --font FONT          Add font (can be used multiple times)\n"
         "  -u, --underline SIZE     Set underline thickness (default: 2)\n"
+        "  -p, --padding SIZE       Set text padding (default: 10)\n"
+        "  -a, --alignment POS      Set default alignment (left|center|right)\n"
+        "  -t, --position POS       Set bar position (top|bottom)\n"
+        "  -m, --margin MARGINS     Set margins (top,right,bottom,left)\n"
+        "  -s, --separator STRING   Set block separator\n"
+        "  -o, --opacity FLOAT      Set background opacity (0.0-1.0)\n"
         "  -h, --help              Show this help message\n",
         program_name);
 }
@@ -95,6 +120,8 @@ struct limebar {
     struct text_block *blocks;
     char **fonts;
     int num_fonts;
+
+      struct bar_config *config;  // Add this
 
     struct {
             double r, g, b, a;
@@ -242,48 +269,113 @@ static void parse_color(const char *color_str, double *r, double *g, double *b) 
 static void draw(struct limebar *bar) {
     printf("Drawing started\n");
 
-        cairo_set_source_rgba(bar->cairo,
-            bar->bg_color.r,
-            bar->bg_color.g,
-            bar->bg_color.b,
-            bar->bg_color.a);
-        cairo_paint(bar->cairo);
+    // Clear with background color and opacity
+    cairo_set_source_rgba(bar->cairo,
+        bar->bg_color.r,
+        bar->bg_color.g,
+        bar->bg_color.b,
+        bar->bg_color.a * bar->config->opacity);
+    cairo_paint(bar->cairo);
 
     if (!bar->pango_context) {
         bar->pango_context = pango_cairo_create_context(bar->cairo);
         bar->pango_layout = pango_layout_new(bar->pango_context);
     }
 
-    int x = 10;
-    struct text_block *block = bar->blocks;
+    // First pass: calculate total width and widths for each block
+    int total_width = 0;
+    int num_blocks = 0;
+    struct {
+        int width;
+        int height;
+        struct text_block *block;
+    } *block_dims;
 
-    while (block) {
-        printf("Drawing block - text: %s\n", block->text);  // Debug print
+    // Count blocks and allocate array
+    for (struct text_block *block = bar->blocks; block; block = block->next) num_blocks++;
+    block_dims = calloc(num_blocks, sizeof(*block_dims));
 
+    // Calculate dimensions
+    int idx = 0;
+    for (struct text_block *block = bar->blocks; block; block = block->next) {
         PangoFontDescription *font_desc = pango_font_description_from_string(
             bar->fonts[block->font_index]);
         pango_layout_set_font_description(bar->pango_layout, font_desc);
+        pango_layout_set_text(bar->pango_layout, block->text, -1);
 
+        pango_layout_get_pixel_size(bar->pango_layout,
+            &block_dims[idx].width,
+            &block_dims[idx].height);
+        block_dims[idx].block = block;
+
+        total_width += block_dims[idx].width;
+        if (idx > 0 && bar->config->separator) {
+            total_width += strlen(bar->config->separator) * 8; // Approximate separator width
+        }
+        total_width += bar->config->padding * 2;
+
+        pango_font_description_free(font_desc);
+        idx++;
+    }
+
+    // Calculate starting x position based on alignment
+    int start_x = bar->config->margin_left;
+    int available_width = bar->width - bar->config->margin_left - bar->config->margin_right;
+
+    if (bar->config->default_alignment == ALIGN_DEFAULT_CENTER) {
+        start_x = (available_width - total_width) / 2 + bar->config->margin_left;
+    } else if (bar->config->default_alignment == ALIGN_DEFAULT_RIGHT) {
+        start_x = available_width - total_width + bar->config->margin_left;
+    }
+
+    // Second pass: actual drawing
+    int x = start_x;
+    for (int i = 0; i < num_blocks; i++) {
+        struct text_block *block = block_dims[i].block;
+        int width = block_dims[i].width;
+        int height = block_dims[i].height;
+
+        // Draw background if specified
+        if (block->bg_color) {
+            double r, g, b;
+            parse_color(block->bg_color, &r, &g, &b);
+            cairo_set_source_rgb(bar->cairo, r, g, b);
+            cairo_rectangle(bar->cairo,
+                x - bar->config->padding,
+                bar->config->margin_top,
+                width + bar->config->padding * 2,
+                bar->height - bar->config->margin_top - bar->config->margin_bottom);
+            cairo_fill(bar->cairo);
+        }
+
+        // Set font and draw text
+        PangoFontDescription *font_desc = pango_font_description_from_string(
+            bar->fonts[block->font_index]);
+        pango_layout_set_font_description(bar->pango_layout, font_desc);
+        pango_layout_set_text(bar->pango_layout, block->text, -1);
+
+        // Set text color
         if (block->fg_color) {
             double r, g, b;
             parse_color(block->fg_color, &r, &g, &b);
             cairo_set_source_rgb(bar->cairo, r, g, b);
-            printf("Setting color: r=%f, g=%f, b=%f\n", r, g, b);  // Debug print
         } else {
             cairo_set_source_rgb(bar->cairo, 1.0, 1.0, 1.0);
         }
 
-        pango_layout_set_text(bar->pango_layout, block->text, -1);
+        // Draw text
+        int y = (bar->height - height) / 2;
+        if (bar->config->position == POSITION_TOP) {
+            y += bar->config->margin_top;
+        } else {
+            y += bar->config->margin_bottom;
+        }
 
-        int width, height;
-        pango_layout_get_pixel_size(bar->pango_layout, &width, &height);
-        printf("Text dimensions: width=%d, height=%d\n", width, height);  // Debug print
-
-        cairo_move_to(bar->cairo, x, (bar->height - height) / 2);
+        cairo_move_to(bar->cairo, x, y);
         pango_cairo_show_layout(bar->cairo, bar->pango_layout);
 
+        // Draw underline
         if (block->underline) {
-            printf("Drawing underline\n");  // Debug print
             double r, g, b;
             if (block->underline_color) {
                 parse_color(block->underline_color, &r, &g, &b);
@@ -294,22 +386,38 @@ static void draw(struct limebar *bar) {
             }
 
             cairo_set_source_rgb(bar->cairo, r, g, b);
-            cairo_set_line_width(bar->cairo, 2.0);
-            cairo_move_to(bar->cairo, x, bar->height - 2);
-            cairo_line_to(bar->cairo, x + width, bar->height - 2);
+            cairo_set_line_width(bar->cairo, bar->config->underline_thickness);
+            cairo_move_to(bar->cairo, x,
+                bar->height - bar->config->margin_bottom - bar->config->underline_thickness);
+            cairo_line_to(bar->cairo, x + width,
+                bar->height - bar->config->margin_bottom - bar->config->underline_thickness);
             cairo_stroke(bar->cairo);
         }
 
-        x += width + 10;
+        x += width + bar->config->padding * 2;
+
+        // Draw separator if not last block
+        if (i < num_blocks - 1 && bar->config->separator) {
+            cairo_set_source_rgb(bar->cairo, 1.0, 1.0, 1.0);  // Separator color
+            PangoFontDescription *sep_font = pango_font_description_from_string(bar->fonts[0]);
+            pango_layout_set_font_description(bar->pango_layout, sep_font);
+            pango_layout_set_text(bar->pango_layout, bar->config->separator, -1);
+            cairo_move_to(bar->cairo, x - bar->config->padding, y);
+            pango_cairo_show_layout(bar->cairo, bar->pango_layout);
+            pango_font_description_free(sep_font);
+        }
+
         pango_font_description_free(font_desc);
-        block = block->next;
     }
 
-    printf("Drawing completed\n");  // Debug print
+    free(block_dims);
 
+    // Commit the surface
     wl_surface_attach(bar->surface, bar->buffer, 0, 0);
     wl_surface_damage_buffer(bar->surface, 0, 0, bar->width, bar->height);
     wl_surface_commit(bar->surface);
+
+    printf("Drawing completed\n");
 }
 
 static void registry_global(void *data, struct wl_registry *registry,
@@ -374,85 +482,143 @@ static const struct zwlr_layer_surface_v1_listener layer_surface_listener = {
     .closed = layer_surface_closed,
 };
 
+static void read_stdin(struct limebar *bar) {
+    char buffer[1024];
+    ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof(buffer) - 1);
+    if (bytes_read > 0) {
+        buffer[bytes_read] = '\0';
+        // Free old blocks
+        struct text_block *block = bar->blocks;
+        while (block) {
+            struct text_block *next = block->next;
+            free(block->text);
+            free(block->fg_color);
+            free(block->bg_color);
+            free(block->underline_color);
+            free(block);
+            block = next;
+        }
+        // Parse new input
+        bar->blocks = parse_input(buffer);
+        // Redraw
+        draw(bar);
+    }
+}
+
 int main(int argc, char *argv[]) {
     struct bar_config config = {
-            .width = 1920,
-            .height = 24,
-            .background_color = "#1a1a1a",
-            .fonts = NULL,
-            .num_fonts = 0,
-            .underline_thickness = 2
-        };
+        .width = 1920,
+        .height = 24,
+        .background_color = "#1a1a1a",
+        .fonts = NULL,
+        .num_fonts = 0,
+        .underline_thickness = 2,
+        .padding = 10,
+        .default_alignment = ALIGN_DEFAULT_LEFT,
+        .position = POSITION_TOP,
+        .margin_top = 0,
+        .margin_bottom = 0,
+        .margin_left = 0,
+        .margin_right = 0,
+        .separator = NULL,
+        .opacity = 1.0
+    };
 
-        // Define command line options
-        static struct option long_options[] = {
-            {"geometry", required_argument, 0, 'g'},
-            {"background", required_argument, 0, 'B'},
-            {"font", required_argument, 0, 'f'},
-            {"underline", required_argument, 0, 'u'},
-            {"help", no_argument, 0, 'h'},
-            {0, 0, 0, 0}
-        };
+    static struct option long_options[] = {
+        {"geometry", required_argument, 0, 'g'},
+        {"background", required_argument, 0, 'B'},
+        {"font", required_argument, 0, 'f'},
+        {"underline", required_argument, 0, 'u'},
+        {"padding", required_argument, 0, 'p'},
+        {"alignment", required_argument, 0, 'a'},
+        {"position", required_argument, 0, 't'},
+        {"margin", required_argument, 0, 'm'},
+        {"separator", required_argument, 0, 's'},
+        {"opacity", required_argument, 0, 'o'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
 
-        // Parse command line options
-        int opt;
-        while ((opt = getopt_long(argc, argv, "g:B:f:u:h", long_options, NULL)) != -1) {
-            switch (opt) {
-                case 'g': {
-                    int x, y;
-                    parse_geometry(optarg, &config.width, &config.height, &x, &y);
-                    break;
-                }
-                case 'B':
-                    config.background_color = optarg;
-                    break;
-                case 'f': {
-                    config.num_fonts++;
-                    config.fonts = realloc(config.fonts, sizeof(char*) * config.num_fonts);
-                    config.fonts[config.num_fonts - 1] = strdup(optarg);
-                    break;
-                }
-                case 'u':
-                    config.underline_thickness = atoi(optarg);
-                    break;
-                case 'h':
-                    print_usage(argv[0]);
-                    return 0;
-                default:
-                    print_usage(argv[0]);
-                    return 1;
+    int opt;
+    while ((opt = getopt_long(argc, argv, "g:B:f:u:p:a:t:m:s:o:h", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'g': {
+                int x, y;
+                parse_geometry(optarg, &config.width, &config.height, &x, &y);
+                break;
             }
+            case 'B':
+                config.background_color = optarg;
+                break;
+            case 'f': {
+                config.num_fonts++;
+                config.fonts = realloc(config.fonts, sizeof(char*) * config.num_fonts);
+                config.fonts[config.num_fonts - 1] = strdup(optarg);
+                break;
+            }
+            case 'u':
+                config.underline_thickness = atoi(optarg);
+                break;
+            case 'p':
+                config.padding = atoi(optarg);
+                break;
+            case 'a':
+                if (strcmp(optarg, "center") == 0)
+                    config.default_alignment = ALIGN_DEFAULT_CENTER;
+                else if (strcmp(optarg, "right") == 0)
+                    config.default_alignment = ALIGN_DEFAULT_RIGHT;
+                break;
+            case 't':
+                if (strcmp(optarg, "bottom") == 0)
+                    config.position = POSITION_BOTTOM;
+                break;
+            case 'm': {
+                int top, right, bottom, left;
+                sscanf(optarg, "%d,%d,%d,%d", &top, &right, &bottom, &left);
+                config.margin_top = top;
+                config.margin_right = right;
+                config.margin_bottom = bottom;
+                config.margin_left = left;
+                break;
+            }
+            case 's':
+                config.separator = strdup(optarg);
+                break;
+            case 'o':
+                config.opacity = atof(optarg);
+                if (config.opacity < 0.0) config.opacity = 0.0;
+                if (config.opacity > 1.0) config.opacity = 1.0;
+                break;
+            case 'h':
+                print_usage(argv[0]);
+                return 0;
+            default:
+                print_usage(argv[0]);
+                return 1;
         }
+    }
 
-        // Set default fonts if none specified
-        if (config.num_fonts == 0) {
-            config.num_fonts = 2;
-            config.fonts = malloc(sizeof(char*) * config.num_fonts);
-            config.fonts[0] = strdup("Monospace 12");
-            config.fonts[1] = strdup("Monospace Bold 12");
-        }
+    // Set default fonts if none specified
+    if (config.num_fonts == 0) {
+        config.num_fonts = 2;
+        config.fonts = malloc(sizeof(char*) * config.num_fonts);
+        config.fonts[0] = strdup("Monospace 12");
+        config.fonts[1] = strdup("Monospace Bold 12");
+    }
 
-        struct limebar bar = {0};
-            bar.width = config.width;
-            bar.height = config.height;
-            bar.num_fonts = config.num_fonts;
-            bar.fonts = config.fonts;
+    struct limebar bar = {0};
+    bar.width = config.width;
+    bar.height = config.height;
+    bar.num_fonts = config.num_fonts;
+    bar.fonts = config.fonts;
+    bar.config = &config;  // Set the config pointer
 
-            // Set background color
-            parse_color_str(config.background_color,
-                &bar.bg_color.r,
-                &bar.bg_color.g,
-                &bar.bg_color.b,
-                &bar.bg_color.a);
-
-            // Remove duplicate font initialization
-            // bar.num_fonts = 2;
-            // bar.fonts = malloc(sizeof(char*) * bar.num_fonts);
-            // bar.fonts[0] = "Monospace 12";
-            // bar.fonts[1] = "Monospace Bold 12";
-
-            const char *test_input = "[F=#ffffff,T=1:Hello] [F=#ff0000,u:World]";
-            bar.blocks = parse_input(test_input);
+    // Set background color
+    parse_color_str(config.background_color,
+        &bar.bg_color.r,
+        &bar.bg_color.g,
+        &bar.bg_color.b,
+        &bar.bg_color.a);
 
     // Connect to Wayland display
     bar.display = wl_display_connect(NULL);
@@ -498,58 +664,67 @@ int main(int argc, char *argv[]) {
     // Commit the surface and wait for the configure event
     wl_surface_commit(bar.surface);
     wl_display_roundtrip(bar.display);
-    wl_display_roundtrip(bar.display); // Add a second roundtrip
 
-    create_buffer(&bar);
-        draw(&bar);
+    // Set up polling
+    struct pollfd fds[2] = {
+        {.fd = STDIN_FILENO, .events = POLLIN},
+        {.fd = wl_display_get_fd(bar.display), .events = POLLIN}
+    };
 
-        wl_surface_commit(bar.surface);
-        wl_display_roundtrip(bar.display);
-        wl_display_roundtrip(bar.display);
-
-    // Main event loop
-    while (wl_display_dispatch(bar.display) != -1) {
-        // Events handled in callbacks
+    // Main event loop with polling
+    while (1) {
+        wl_display_flush(bar.display);
+        if (poll(fds, 2, -1) > 0) {
+            if (fds[0].revents & POLLIN) {
+                read_stdin(&bar);
+            }
+            if (fds[1].revents & POLLIN) {
+                if (wl_display_dispatch(bar.display) < 0) {
+                    break;
+                }
+            }
+        }
     }
 
     // Cleanup
-        struct text_block *block = bar.blocks;
-        while (block) {
-            struct text_block *next = block->next;
-            free(block->text);
-            free(block->fg_color);
-            free(block->bg_color);
-            free(block->underline_color);
-            free(block);
-            block = next;
-        }
-        for (int i = 0; i < config.num_fonts; i++) {
-                free(config.fonts[i]);
-            }
-            free(config.fonts);
+    if (config.separator) free(config.separator);
+    struct text_block *block = bar.blocks;
+    while (block) {
+        struct text_block *next = block->next;
+        free(block->text);
+        free(block->fg_color);
+        free(block->bg_color);
+        free(block->underline_color);
+        free(block);
+        block = next;
+    }
+    for (int i = 0; i < config.num_fonts; i++) {
+        free(config.fonts[i]);
+    }
+    free(config.fonts);
 
-        if (bar.cairo)
-            cairo_destroy(bar.cairo);
-        if (bar.cairo_surface)
-            cairo_surface_destroy(bar.cairo_surface);
-        if (bar.buffer)
-            wl_buffer_destroy(bar.buffer);
-        if (bar.shm_data)
-            munmap(bar.shm_data, bar.width * bar.height * 4);
-        if (bar.layer_surface)
-            zwlr_layer_surface_v1_destroy(bar.layer_surface);
-        if (bar.surface)
-            wl_surface_destroy(bar.surface);
-        if (bar.layer_shell)
-            zwlr_layer_shell_v1_destroy(bar.layer_shell);
-        if (bar.shm)
-            wl_shm_destroy(bar.shm);
-        if (bar.compositor)
-            wl_compositor_destroy(bar.compositor);
-        if (bar.registry)
-            wl_registry_destroy(bar.registry);
-        if (bar.display)
-            wl_display_disconnect(bar.display);
+    if (bar.cairo)
+        cairo_destroy(bar.cairo);
+    if (bar.cairo_surface)
+        cairo_surface_destroy(bar.cairo_surface);
+    if (bar.buffer)
+        wl_buffer_destroy(bar.buffer);
+    if (bar.shm_data)
+        munmap(bar.shm_data, bar.width * bar.height * 4);
+    if (bar.layer_surface)
+        zwlr_layer_surface_v1_destroy(bar.layer_surface);
+    if (bar.surface)
+        wl_surface_destroy(bar.surface);
+    if (bar.layer_shell)
+        zwlr_layer_shell_v1_destroy(bar.layer_shell);
+    if (bar.shm)
+        wl_shm_destroy(bar.shm);
+    if (bar.compositor)
+        wl_compositor_destroy(bar.compositor);
+    if (bar.registry)
+        wl_registry_destroy(bar.registry);
+    if (bar.display)
+        wl_display_disconnect(bar.display);
 
-        return 0;
+    return 0;
 }
